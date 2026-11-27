@@ -2,6 +2,8 @@ var fs = require('fs');
 var exec = require('child_process').exec;
 var spawn = require('child_process').spawn;
 var http = require('http');
+var https = require('https');
+var crypto = require('crypto');
 //var download = require('download');
 
 var Mitsuba = {
@@ -12,6 +14,27 @@ var Mitsuba = {
 
 	temp_folder: "temp",
 	valid_extensions: {"jpg":true,"png":true,"obj":true,"serialized":true},
+
+	//hosts the server is allowed to download resources from (besides the host of the editor that connected), comma separated
+	download_hosts: ( process.env.MITSUBA_DOWNLOAD_HOSTS || "" ).split(",").map( function(v){ return v.trim().toLowerCase(); } ).filter( Boolean ),
+
+	//only plain file names inside the client folder: no paths, no "..", no hidden files
+	isSafeFilename: function( filename )
+	{
+		return typeof(filename) == "string" && filename.length < 256 && /^[A-Za-z0-9_\-][A-Za-z0-9_.\-]*$/.test( filename ) && filename.indexOf("..") == -1;
+	},
+
+	//relative path made only of safe names, e.g. "user/textures/wood.png" (resources keep their folder so the scene XML can find them)
+	isSafeRelativePath: function( path )
+	{
+		if( typeof(path) != "string" || !path.length || path.length > 1024 )
+			return false;
+		var parts = path.split("/");
+		for(var i = 0; i < parts.length; ++i)
+			if( !this.isSafeFilename( parts[i] ) )
+				return false;
+		return true;
+	},
 
 	start: function()
 	{
@@ -24,10 +47,9 @@ var Mitsuba = {
 		}
 	},
 
-	onClientJoin: function( connection )
+	onClientJoin: function( connection, origin )
 	{
-		var client = new Client( connection );
-		client.id = this.last_id;
+		var client = new Client( connection, this.last_id, origin );
 		this.last_id++;
 		this.clients.push( client );
 		this.clients_by_id[ client.id ] = client;
@@ -46,22 +68,23 @@ var Mitsuba = {
 
 	onRequest: function ( request, response )
 	{
-		if(1)
-		{
-			response.end( JSON.stringify( { 
-				server: "mitsuba",
-				clients: this.clients_by_id
-			})); //send a response
-		}
+		//do not expose client IPs, only the number of clients
+		response.setHeader("Content-Type","application/json");
+		response.end( JSON.stringify( { 
+			server: "mitsuba",
+			num_clients: this.clients.length
+		})); //send a response
 	}
 };
 
-function Client( connection )
+function Client( connection, id, origin )
 {
 	this.connection = connection;
-	this.id = -1;
+	this.id = id;
+	this.origin = origin || "";
 	this.ip = connection.remoteAddress;
-	this.folder = Mitsuba.temp_folder + "/" + "user_test";
+	//every client gets its own folder so clients cannot read or overwrite each other's files
+	this.folder = Mitsuba.temp_folder + "/" + "user_" + id + "_" + crypto.randomBytes(8).toString("hex");
 	this.status = "waiting";
 	this.mitsuba_process = null;
 	this.all_processes = [];
@@ -93,7 +116,12 @@ Client.prototype.onMessage = function( msg )
 	}
 	else if(msg.action == "rename")
 	{
-		fs.rename( this.folder + "/file.bin", this.folder + "/" + msg.filename );
+		if( !Mitsuba.isSafeFilename( msg.filename ) )
+			return this.error("invalid filename");
+		fs.rename( this.folder + "/file.bin", this.folder + "/" + msg.filename, function(err){
+			if(err)
+				that.error("rename failed");
+		});
 		this.log("file renamed to: " + msg.filename );
 	}
 	else if(msg.action == "renderFrame")
@@ -108,13 +136,16 @@ Client.prototype.onMessage = function( msg )
 	}
 	else if(msg.action == "startbin")
 	{
-		this._files_pending += 1;
+		if( !Mitsuba.isSafeFilename( msg.filename ) ) //safety
+			return this.error("invalid filename");
 		this.log("starting bin file for: " + msg.filename );
-		if( msg.filename.indexOf("/") != -1 ) //safety
-			return;
 		var fullpath = this.folder + '/' + msg.filename;
 		if( this.current_bin && this.current_bin.stream )
+		{
 			this.current_bin.stream.end();
+			this._files_pending -= 1;
+		}
+		this._files_pending += 1;
 		this.current_bin = {
 			filename: fullpath,
 			basename: msg.filename,
@@ -144,15 +175,22 @@ Client.prototype.onMessage = function( msg )
 	}
 	else if(msg.action == "download")
 	{
+		if( typeof(msg.url) != "string" || typeof(msg.full_url) != "string" )
+			return this.error("invalid download request");
 		this.downloadURL( msg.url, msg.full_url );
 	}
 }
 
 Client.prototype.writeFile = function( filename, data )
 {
-	if( filename.indexOf("/") != -1 ) //safety
+	if( !Mitsuba.isSafeFilename( filename ) ) //safety
 	{
 		console.log("dangerous filename:", filename );
+		return;
+	}
+	if( typeof(data) != "string" )
+	{
+		this.error("invalid file content");
 		return;
 	}
 
@@ -171,7 +209,8 @@ Client.prototype.writeFile = function( filename, data )
 Client.prototype.unzipFile = function( filename, on_complete )
 {
 	var that = this;
-	var process = spawn( 'unzip', [ '-o', filename ], { cwd: this.folder } ); //-o for overwrite
+	//-o overwrite. Info-ZIP unzip already strips absolute paths and "../" from entries (zip slip), we do NOT pass "-:" which would allow them
+	var process = spawn( 'unzip', [ '-o', filename ], { cwd: this.folder } );
 	this.all_processes.push( process );
 
 	process.stdout.on('data', function (data) {
@@ -202,11 +241,13 @@ Client.prototype.onBinary = function( data )
 
 Client.prototype.send = function( data )
 {
+	if( !this.connection || !this.connection.connected )
+		return;
 	if( data.constructor === Object )
 		this.connection.send( JSON.stringify( data ) );
 	else if( data.constructor === ArrayBuffer )
 	{
-		var buffer = new Buffer( msg.buffer );
+		var buffer = Buffer.from( data );
 		this.connection.sendBytes( buffer );
 	}
 }
@@ -241,9 +282,34 @@ Client.prototype.downloadURL = function( filename, url, on_complete )
 {
 	var that = this;
 	var ext = this.getFileExtension( filename );
-	if( !Mitsuba.valid_extensions[ ext ] || filename.indexOf("..") != -1 )
+	if( !Mitsuba.valid_extensions[ ext ] || !Mitsuba.isSafeRelativePath( filename ) )
 	{
 		this.log("invalid filename");
+		return false;
+	}
+
+	//avoid SSRF: only http(s) and only from the editor host or the configured hosts
+	var url_info = null;
+	try
+	{
+		url_info = new URL( url );
+	}
+	catch (err)
+	{
+		this.error("invalid url");
+		return false;
+	}
+	if( url_info.protocol != "http:" && url_info.protocol != "https:" )
+	{
+		this.error("only http/https downloads are allowed");
+		return false;
+	}
+	var origin_host = "";
+	try { origin_host = new URL( this.origin ).host.toLowerCase(); } catch (err) {}
+	var host = url_info.host.toLowerCase();
+	if( host != origin_host && Mitsuba.download_hosts.indexOf( host ) == -1 )
+	{
+		this.error("download host not allowed: " + host );
 		return false;
 	}
 
@@ -255,23 +321,53 @@ Client.prototype.downloadURL = function( filename, url, on_complete )
 	this.log( "Downloading remote file: " + filename );
 
 	//node stuff
-	var file = fs.createWriteStream( fullname );
 	this._files_pending += 1;
-	var request = http.get( url, function(response) {
+	var done = false;
+	function finish( ok )
+	{
+		if(done)
+			return;
+		done = true;
+		that._files_pending -= 1;
+		if(ok)
+		{
+			that.log( "File downloaded: " + filename );
+			if(on_complete)
+				on_complete();
+		}
+	}
+
+	var request = ( url_info.protocol == "https:" ? https : http ).get( url_info, function(response) {
 		if(response.statusCode != 200)
 		{
+			response.resume();
 			that.log("File not found: " + filename);
+			finish(false);
 			return;
 		}
+		var folder = fullname.substr( 0, fullname.lastIndexOf("/") );
+		try
+		{
+			fs.mkdirSync( folder, { recursive: true } );
+		}
+		catch (err)
+		{
+			response.resume();
+			that.error("cannot create folder for: " + filename );
+			finish(false);
+			return;
+		}
+		var file = fs.createWriteStream( fullname );
 		response.pipe(file);
-		that._files_pending -= 1;
-		that.log( "File downloaded: " + filename );
-		if(on_complete)
-			on_complete();
+		file.on("finish", function(){ finish(true); });
+		file.on("error", function(e){ that.error("cannot write file: " + filename ); finish(false); });
 	});
+
+	request.setTimeout( 60000, function(){ request.destroy( new Error("timeout") ); });
 
 	request.on('error', (e) => {
 		that.error('problem with request: ' + e.message );
+		finish(false);
 	});
 
 	return true;
@@ -370,25 +466,34 @@ Client.prototype.onLeave = function()
 {
 	var that = this;
 	console.log( "user leaving: " + this.ip );
-	if (fs.existsSync( this.folder )){
-		//clear folder on disconnection
-		if(1)
-			return;
-		that.log("Deleting user temp folder...");
-		deleteFolderRecursive( that.folder );
-		that.log("Folder deleted");
-	}
+
+	if( this.current_bin && this.current_bin.stream )
+		this.current_bin.stream.end();
+	this.current_bin = null;
 
 	//do not leave anything running
 	if(this.all_processes.length)
 	{
-		that.log("Killing all processes atteched to client");
+		console.log("Killing all processes attached to client " + this.id );
 		for(var i = 0; i < this.all_processes.length; ++i)
 		{
 			var process = this.all_processes[i];
 			process.kill();
 		}
 		this.all_processes.length = 0;
+	}
+
+	//clear folder on disconnection (each client has its own folder)
+	if (fs.existsSync( this.folder )){
+		console.log("Deleting user temp folder: " + this.folder );
+		try
+		{
+			deleteFolderRecursive( that.folder );
+		}
+		catch (err)
+		{
+			console.error("Error deleting folder:", err );
+		}
 	}
 }
 

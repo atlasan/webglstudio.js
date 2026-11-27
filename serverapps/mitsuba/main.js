@@ -2,10 +2,29 @@ console.log("Mitsuba WebSocket Server\n**************************");
 
 //SETTINGS
 var port = 9003;
+var max_clients = parseInt( process.env.MITSUBA_MAX_CLIENTS || "4" );
+
+//origins (editor hosts) allowed to connect, comma separated, e.g. "https://myserver.com,http://localhost:8000"
+//use "*" to allow any origin (NOT recommended: anyone could use this machine to run renders)
+var allowed_origins = ( process.env.MITSUBA_ALLOWED_ORIGINS || "" ).split(",").map( function(v){ return v.trim(); } ).filter( Boolean );
 
 var index = process.argv.indexOf("-p");
 if(index != -1)
 	port = parseInt( process.argv[ index + 1 ] );
+
+index = process.argv.indexOf("-o");
+if(index != -1)
+	allowed_origins = process.argv[ index + 1 ].split(",").map( function(v){ return v.trim(); } ).filter( Boolean );
+
+if(!allowed_origins.length)
+	console.log("Warning: no allowed origins set (MITSUBA_ALLOWED_ORIGINS or -o), all WebSocket connections will be rejected.");
+
+function isOriginAllowed( origin )
+{
+	if( allowed_origins.indexOf("*") != -1 )
+		return true;
+	return !!origin && allowed_origins.indexOf( origin ) != -1;
+}
 
 //CREATE GAME *********************
 var Mitsuba = require("./mitsuba.js");
@@ -29,8 +48,11 @@ var server = http.createServer( function(request, response) {
 });
 
 server.on("error", function(err){
-	console.log("Error: Port ",port," is in use.");
-	process.exit();
+	if( err.code == "EADDRINUSE" )
+		console.log("Error: Port ",port," is in use.");
+	else
+		console.log("Error:", err );
+	process.exit(1);
 });
 
 server.listen( port, function() {
@@ -43,16 +65,55 @@ wsServer = new WebSocketServer({ // create the server
     httpServer: server //if we already have our HTTPServer in server variable...
 });
 wsServer.on('request', function(request) {
-	//accept all connections
+	//only accept connections coming from known editors
+	if( !isOriginAllowed( request.origin ) )
+	{
+		console.log("Connection rejected from origin:", request.origin );
+		request.reject( 403, "Origin not allowed" );
+		return;
+	}
+
+	if( Mitsuba.clients.length >= max_clients )
+	{
+		console.log("Connection rejected, too many clients" );
+		request.reject( 503, "Server busy" );
+		return;
+	}
+
     var connection = request.accept( null, request.origin );
 
 	//create client
-	var client = Mitsuba.onClientJoin( connection );
+	var client = Mitsuba.onClientJoin( connection, request.origin );
 
 	//when users send message
     connection.on('message', function( message ) {
 		if( message.type == "utf8" )
-			client.onMessage( JSON.parse( message.utf8Data ) );
+		{
+			var msg = null;
+			try
+			{
+				msg = JSON.parse( message.utf8Data );
+			}
+			catch (err)
+			{
+				client.error("invalid JSON message");
+				return;
+			}
+			if( !msg || msg.constructor !== Object || typeof(msg.action) != "string" )
+			{
+				client.error("invalid message");
+				return;
+			}
+			try
+			{
+				client.onMessage( msg );
+			}
+			catch (err)
+			{
+				console.error( "Error processing message:", err );
+				client.error("error processing message");
+			}
+		}
 		else if( message.type == "binary" )
 			client.onBinary( message.binaryData );
 		else
