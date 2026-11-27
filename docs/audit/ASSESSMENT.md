@@ -80,7 +80,7 @@ Severity is rated for a deployment that's exposed to the internet.
 | S1 | `serverapps/project_deployer/deployer.php:17` | `explode($IGNORE_EXTENSIONS, ",")` has its **arguments swapped**, so the extension blocklist is never applied. `array_search(...) != false` also misses index 0. A deploy can then download `.php` files into a web-served folder. That's **remote code execution** for anyone who has the deploy key. |
 | S2 | `deployer.php:166-185` | Path checks are weak. The `strpos(..., "..") != false` check misses `..` at position 0. Filenames in `files[]` and `scene` aren't checked at all, so `project_folder . "/" . $filename` can write outside the deploy folder (`../`). |
 | S3 | `serverapps/fbxconv/fbxconv.php:24-35` | `?done=<name>` **deletes a file without any authentication**. It blocks only `..` and a leading `/`, so `?done=fbxconv.php` deletes the script itself (or any file in the working directory). Uploads are also unauthenticated and have no size limit. Cleanup is disabled (`if(0)`), so `temp/` grows without bound (a disk-filling DoS). |
-| S4 | `editor/js/modules/sceneStorage.js:57` | `index.html?scene=<any URL>` loads a scene from any origin. Scenes can contain scripts that run with `new Function` / `eval` inside the editor's origin. Anyone who sends a link can then run JS **with the victim's LiteFileSystem session** (stored XSS by design). |
+| S4 | `editor/player.html` (`?url=`) | The player loads a scene from the URL, and scenes run code on the editor's origin, where the LiteFileSystem token is in `localStorage`. The `indexOf("://")` check is **bypassed with `//evil.example/scene.json`**, and once an external file server is configured, **any host** is allowed. *(Corrected: the editor's `index.html?scene=` path in `sceneStorage.js` is already commented out upstream.)* Fixed on branch `fix/remote-scene-trust`. |
 | S5 | `serverapps/mitsuba/main.js` | The WebSocket server **accepts any origin and has no auth**. Any client can upload files, unzip them (`unzip -o`) and start `mitsuba` processes. `JSON.parse` on incoming messages isn't wrapped in try/catch, so one bad message **crashes the server**. |
 
 ### Medium / Low
@@ -103,14 +103,14 @@ Severity is rated for a deployment that's exposed to the internet.
 | Maintenance | ★☆☆☆☆ | Abandoned upstream (moved to onedit.org); last code change in 2020 |
 | Build / tooling | ★☆☆☆☆ | No package manager, bundler, tests, lint or CI |
 | Security (server apps) | ★☆☆☆☆ | S1–S3, S5: don't expose serverapps as they are |
-| Security (editor) | ★★☆☆☆ | Shared scenes execute code (S4). That's acceptable only on a single-user, trusted deployment |
+| Security (editor) | ★★☆☆☆ | Shared scenes execute code on the editor origin (S4, player.html). That's acceptable only on a single-user, trusted deployment |
 | Docs | ★★★☆☆ | `guides/` are useful for developers. The INSTALL steps are dated |
 
 ## 6. Suggested next steps (in priority order)
 
 1. **Decide the fork's direction:** keep maintaining WebGLStudio, or evaluate migrating to onedit.org as upstream did.
 2. **Quick security fixes:** S1/S2 (fix `explode`, validate paths with `realpath`), S3 (require auth on `done`, re-enable cleanup, `implode` fix for PHP 8), S5 (origin allowlist, try/catch).
-3. Restrict `?scene=` to same-origin or an allowlist, or ask the user to confirm before running scripts from a remote scene.
+3. Restrict `player.html?url=` to trusted origins (done in `fix/remote-scene-trust`). Longer term, serve user content from a separate origin.
 4. Add a root `package.json` with a static dev server, ESLint and a smoke test (e.g. Playwright loading `index.html`), plus CI.
 5. Rebuild the `serverapps/mitsuba` manifest (`package.json` + `websocket`) and refresh its dependencies.
 6. Write a Docker Compose setup (php-apache + mysql + LiteFileSystem) so the full stack can be reproduced locally.
