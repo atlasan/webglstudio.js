@@ -46,31 +46,75 @@
 
 	var player = new LS.Player(settings);
 
-	var allow_remote_scenes = false; //allow scenes with full urls? this could be not safe...
+	//SCENE URL POLICY *************************
+	//a scene can contain scripts that run with the privileges of this page (same origin as the editor,
+	//which keeps the file server session token in localStorage), so only scenes from trusted origins are loaded:
+	//this same origin, plus the external file server configured by the user in the editor (Drive preferences)
+	var trusted_scene_origins = [ location.origin ];
 
 	//support for external server
-	var data = localStorage.getItem("wgl_user_preferences" );
-	if(data)
+	try
 	{
-		var config = JSON.parse(data);
-		if(config.modules.Drive && config.modules.Drive.fileserver_files_url)
+		var data = localStorage.getItem("wgl_user_preferences" );
+		var config = data ? JSON.parse(data) : null;
+		var files_url = config && config.modules && config.modules.Drive && config.modules.Drive.fileserver_files_url;
+		if( files_url )
 		{
-			allow_remote_scenes = true;
-			LS.ResourcesManager.setPath( config.modules.Drive.fileserver_files_url );
+			LS.ResourcesManager.setPath( files_url );
+			trusted_scene_origins.push( new URL( files_url, location.href ).origin );
 		}
+	}
+	catch (err)
+	{
+		console.warn("Player: cannot read user preferences", err );
+	}
+
+	//returns true if the scene url points to http(s) in one of the trusted origins
+	//(resolving it like the browser does, so "//other.host/x.json" or "data:..." are not considered local)
+	function isTrustedSceneURL( url )
+	{
+		if( typeof(url) != "string" || !url )
+			return false;
+		var resolved = null;
+		try
+		{
+			resolved = new URL( url, location.href );
+		}
+		catch (err)
+		{
+			return false;
+		}
+		if( resolved.protocol != "http:" && resolved.protocol != "https:" )
+			return false;
+		return trusted_scene_origins.indexOf( resolved.origin ) != -1;
+	}
+
+	function showPlayerMessage( text )
+	{
+		var div = document.createElement("div");
+		div.style.cssText = "position:fixed;left:0;right:0;top:40%;text-align:center;color:#ddd;font:16px sans-serif;padding:0 16px;";
+		div.textContent = text; //textContent: never interpret the url as html
+		document.body.appendChild( div );
 	}
 
 	//allow to use Canvas2D call in the WebGLCanvas (this is not mandatory, just useful)
 	if( window.enableWebGLCanvas )
 		enableWebGLCanvas( gl.canvas );
+
 	if( LS.queryString["debug"] )
 		player.enableDebug();
 
 	//this code defines which scene to load, in case you are loading an specific scene replce it by player.loadScene( scene_url )
+	var scene_url = LS.queryString["url"];
 	if( LS.queryString["session"] )
 		player.setScene( JSON.parse( localStorage.getItem( LS.queryString["session"] ) ) );
-	else if( allow_remote_scenes || (LS.queryString["url"] && LS.queryString["url"].indexOf("://") == -1) ) //for safety measures
-		player.loadScene( LS.queryString["url"] ); //the url must be something like: fileserver/files/guest/projects/Lee_FX.json
+	else if( scene_url && isTrustedSceneURL( scene_url ) )
+		player.loadScene( scene_url ); //the url must be something like: fileserver/files/guest/projects/Lee_FX.json
+	else if( scene_url )
+	{
+		console.error("Player: scene url blocked, it is not from a trusted origin:", scene_url );
+		showPlayerMessage( "This scene cannot be loaded: it is not hosted on this server or on your configured file server. Scenes can run code, so only trusted sources are allowed: " + scene_url );
+	}
 	else if( LS.queryString["preview"] === undefined )
 		player.loadConfig("config.json");
 
