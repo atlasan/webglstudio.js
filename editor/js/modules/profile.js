@@ -28,6 +28,13 @@ var ProfileModule = {
 		this.loginarea = loginarea;
 		document.querySelector("#mainmenubar").appendChild( loginarea );
 
+		//file server disabled (default): work offline, never contact the server
+		if( !CORE.isFileServerEnabled() )
+		{
+			loginarea.innerHTML = "<span title='File server disabled. Set \"fileserver_enabled\": true in config.json to enable login and remote storage.'>offline mode</span>";
+			return;
+		}
+
 		if(!CORE.server_url)
 		{
 			console.warn("No server url found in ProfileModule from config.json.");
@@ -136,6 +143,13 @@ var ProfileModule = {
 
 	showLoginDialog: function( force_login, section )
 	{
+		if( !CORE.isFileServerEnabled() )
+		{
+			var dialog = LiteGUI.alert("The file server is disabled in this installation, so login and remote storage are not available. To enable it set <b>\"fileserver_enabled\": true</b> in config.json (see docs/security/fileserver-opt-in.md).", { title: "Offline mode" });
+			dialog.setSize(420,200);
+			return;
+		}
+
 		if(this.login_dialog)
 		{
 			this.login_dialog.highlight();

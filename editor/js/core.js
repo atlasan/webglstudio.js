@@ -15,6 +15,13 @@ var CORE = {
 	_modules_initialized: false,
 	send_log_to_console: false,
 
+	//LiteFileSystem (login, remote storage) is OFF unless config.json says "fileserver_enabled": true
+	//it is a server setting on purpose: user preferences cannot turn it on
+	isFileServerEnabled: function()
+	{
+		return !!( this.config && this.config.fileserver_enabled === true );
+	},
+
 	//called from index.html
 	init: function( )
 	{

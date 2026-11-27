@@ -1959,6 +1959,8 @@ var DriveModule = {
 		var that = this;
 
 		widgets.addTitle("Files server configuration");
+		if( !CORE.isFileServerEnabled() )
+			widgets.addInfo(null,"The file server is disabled in config.json (fileserver_enabled), these settings have no effect");
 		widgets.addInfo(null,"You must restart WebGLStudio to changes take effect");
 
 		widgets.addString("Drive Service URL", this.preferences.fileserver_url, function(v){ 
